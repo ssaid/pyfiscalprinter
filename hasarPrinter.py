@@ -321,14 +321,17 @@ class HasarPrinter(PrinterInterface):
         return self._sendCommand(self.CMD_OPEN_DNFH, ["x", "T", number[:20]])
 
     def closeDocument(self):
-        if self._currentDocument in (self.CURRENT_DOC_TICKET, self.CURRENT_DOC_BILL_TICKET):
-            for desc, payment in self._savedPayments:
-                self._sendCommand(self.CMD_ADD_PAYMENT, [self._formatText(desc, "paymentDescription"),
-                                   payment, "T", "1"])
+        if self._currentDocument in (self.CURRENT_DOC_TICKET, self.CURRENT_DOC_BILL_TICKET,
+                        self.CURRENT_DOC_CREDIT_BILL_TICKET, self.CURRENT_DOC_CREDIT_TICKET):
 
             for desc, amount, aliq in self._savedPerceptions:
                 self._sendCommand(self.CMD_PERCEPTIONS, [aliq, self._formatText(desc, "perceptionDescription"),
                                        amount])
+
+
+            for desc, payment in self._savedPayments:
+                self._sendCommand(self.CMD_ADD_PAYMENT, [self._formatText(desc, "paymentDescription"),
+                                   payment, "T", "1"])
 
             del self._savedPayments
             del self._savedPerceptions
@@ -423,7 +426,7 @@ class HasarPrinter(PrinterInterface):
         priceUnit = amount
         priceUnitStr = str(priceUnit).replace(",", ".")
         reply = self._sendCommand(self.CMD_GENERAL_DISCOUNT,
-                          [self._formatText(description, 'generalDiscount'), priceUnitStr, sign, "1", "T"])
+                          [self._formatText(description, 'generalDiscount'), priceUnitStr, sign, "1", "B"])
         return reply
 
     def addRemitItem(self, description, quantity):
