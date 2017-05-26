@@ -90,6 +90,8 @@ class HasarPrinter(PrinterInterface):
 
     CMD_SET_HEADER_TRAILER = 0x5d
 
+    CMD_PERCEPTIONS = 0x60
+
     # Documentos no fiscales homologados (remitos, recibos, etc.)
     CMD_OPEN_DNFH = 0x80
     CMD_PRINT_EMBARK_ITEM = 0x82
@@ -115,6 +117,7 @@ class HasarPrinter(PrinterInterface):
                  'customerName': 30,
                  'custAddressSize': 40,
                  'paymentDescription': 30,
+                 'perceptionDescription': 21, # TODO: Chequear en el manual
                  'fiscalText': 20,
                  'lineItem': 20,
                  'lastItemDiscount': 20,
@@ -126,6 +129,7 @@ class HasarPrinter(PrinterInterface):
                   'customerName': 50,
                   'custAddressSize': 50,
                   'paymentDescription': 50,
+                  'perceptionDescription': 21,
                   'fiscalText': 50,
                   'lineItem': 50,
                   'lastItemDiscount': 50,
@@ -263,6 +267,7 @@ class HasarPrinter(PrinterInterface):
             type = "B"
         self._currentDocument = self.CURRENT_DOC_BILL_TICKET
         self._savedPayments = []
+        self._savedPerceptions = []
         return self._sendCommand(self.CMD_OPEN_FISCAL_RECEIPT, [type, "T"])
 
     def openTicket(self, defaultLetter="B"):
@@ -297,6 +302,7 @@ class HasarPrinter(PrinterInterface):
             type = "S"
         self._currentDocument = self.CURRENT_DOC_CREDIT_BILL_TICKET
         self._savedPayments = []
+        self._savedPerceptions = []
         self._sendCommand(self.CMD_CREDIT_NOTE_REFERENCE, ["1", reference])
         return self._sendCommand(self.CMD_OPEN_CREDIT_NOTE, [type, "T"])
 
@@ -315,11 +321,20 @@ class HasarPrinter(PrinterInterface):
         return self._sendCommand(self.CMD_OPEN_DNFH, ["x", "T", number[:20]])
 
     def closeDocument(self):
-        if self._currentDocument in (self.CURRENT_DOC_TICKET, self.CURRENT_DOC_BILL_TICKET):
+        if self._currentDocument in (self.CURRENT_DOC_TICKET, self.CURRENT_DOC_BILL_TICKET,
+                        self.CURRENT_DOC_CREDIT_BILL_TICKET, self.CURRENT_DOC_CREDIT_TICKET):
+
+            for desc, amount, aliq in self._savedPerceptions:
+                self._sendCommand(self.CMD_PERCEPTIONS, [aliq, self._formatText(desc, "perceptionDescription"),
+                                       amount])
+
+
             for desc, payment in self._savedPayments:
                 self._sendCommand(self.CMD_ADD_PAYMENT, [self._formatText(desc, "paymentDescription"),
                                    payment, "T", "1"])
+
             del self._savedPayments
+            del self._savedPerceptions
             reply = self._sendCommand(self.CMD_CLOSE_FISCAL_RECEIPT)
             return reply[2]
         if self._currentDocument in (self.CURRENT_DOC_NON_FISCAL, ):
@@ -355,7 +370,7 @@ class HasarPrinter(PrinterInterface):
             return status
         raise NotImplementedError
 
-    def addItem(self, description, quantity, price, iva, discount, discountDescription, negative=False):
+    def addItem(self, description, quantity, price, iva, discount, discountDescription, negative=False, qualify_amount="B"):
         if type(description) in types.StringTypes:
             description = [description]
         if negative:
@@ -370,17 +385,33 @@ class HasarPrinter(PrinterInterface):
             self._sendCommand(self.CMD_PRINT_TEXT_IN_FISCAL, [self._formatText(d, 'fiscalText'), "0"])
         reply = self._sendCommand(self.CMD_PRINT_LINE_ITEM,
                                    [self._formatText(description[-1], 'lineItem'),
-                                     quantityStr, priceUnitStr, ivaStr, sign, "0.0", "1", "T"])
+                                     quantityStr, priceUnitStr, ivaStr, sign, "0.0", "1", qualify_amount])
         if discount:
             discountStr = str(float(discount)).replace(",", ".")
             self._sendCommand(self.CMD_LAST_ITEM_DISCOUNT,
                 [self._formatText(discountDescription, 'discountDescription'), discountStr,
-                  "m", "1", "T"])
+                  "m", "1", qualify_amount])
         return reply
 
     def addPayment(self, description, payment):
         paymentStr = ("%.2f" % round(payment, 2)).replace(",", ".")
         self._savedPayments.append((description, paymentStr))
+
+    def addPerception(self, description, amount, aliq="**.**"):
+        """Agrega percepciones al comprobante
+
+        :description: Descripcion de la percepcion
+        :amount: Monto de la percepcion
+        :aliq: Alicuota de IVA. Si se llenan con **.** corresponde
+               a una percepcion general
+        :returns: respuesta de la impresora
+
+        """
+        # TODO: Agregar validaciones como la cantidad por comprobante y
+        # otras que describe el manual
+        amountStr = ("%.2f" % round(amount, 2)).replace(",", ".")
+        aliq = str(aliq)
+        self._savedPerceptions.append((description, amountStr, aliq))
 
     def addAdditional(self, description, amount, iva, negative=False):
         """Agrega un adicional a la FC.
@@ -395,7 +426,7 @@ class HasarPrinter(PrinterInterface):
         priceUnit = amount
         priceUnitStr = str(priceUnit).replace(",", ".")
         reply = self._sendCommand(self.CMD_GENERAL_DISCOUNT,
-                          [self._formatText(description, 'generalDiscount'), priceUnitStr, sign, "1", "T"])
+                          [self._formatText(description, 'generalDiscount'), priceUnitStr, sign, "1", "B"])
         return reply
 
     def addRemitItem(self, description, quantity):

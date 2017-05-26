@@ -36,7 +36,7 @@ class ProxyError(PrinterException):
     errorNumber = 5
 
 class EpsonFiscalDriver:
-    WAIT_TIME = 10
+    WAIT_TIME = 2
     RETRIES = 4
     WAIT_CHAR_TIME = 0.1
     NO_REPLY_TRIES = 200
@@ -63,7 +63,11 @@ class EpsonFiscalDriver:
                           ]
 
     def __init__( self, deviceFile, speed = 9600 ):
-        self._serialPort = serial.Serial( port = deviceFile, timeout = None, baudrate = speed )
+        try:
+            self._serialPort = serial.Serial( port = deviceFile, timeout = 1, baudrate = speed )
+        except serial.SerialTimeoutException, e:
+            print e
+            import ipdb; ipdb.set_trace()
         self._initSequenceNumber()
 
     def _initSequenceNumber( self ):
