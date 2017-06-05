@@ -110,6 +110,215 @@ class EpsonPrinter(PrinterInterface):
             logging.getLogger().error("epsonFiscalDriver.PrinterException: %s" % str(e))
             raise PrinterException("Error de la impresora fiscal: " + str(e))
 
+    def receipt(self, rdict):
+        """
+        This will be called when the endpoint print_xml_receipt is called.
+        """
+        import pprint
+        pprint.pprint(rdict)
+        printer = self
+# Creamos un ticket
+        client = rdict['receipt']['client']
+        if client:
+            client_name = client['name']
+        else:
+            client_name = 'Consumidor Final'
+        if not client or not client['fp']:  # Consumidor Final: FC/NC B
+            invoice_denomination = "B"
+            customer_iva_type = printer.IVA_TYPE_CONSUMIDOR_FINAL
+            customer_name = client_name
+            customer_doc = None
+            customer_address = ""
+            customer_doc_type = None
+        else:  # Ask the fiscal position
+            fp_str = client['fp'][1]
+            if fp_str == 'RI':
+                invoice_denomination = "A"
+                customer_iva_type = printer.IVA_TYPE_RESPONSABLE_INSCRIPTO
+                customer_name = client_name
+                customer_doc = client['vat']
+                customer_address = client['address']
+                customer_doc_type = printer.DOC_TYPE_CUIT
+            else:  # != RI
+                invoice_denomination = "B"
+                customer_iva_type = printer.IVA_TYPE_CONSUMIDOR_FINAL
+                customer_name = client_name
+                customer_doc = None
+                customer_address = ""
+                customer_doc_type = None
+
+        subtotal = rdict['receipt']['subtotal']
+        if subtotal > 0:
+            invoice_type = 'FC'
+        elif subtotal < 0:
+            invoice_type = 'NC'
+        else:
+            print 'Never should enter here!'
+            sys.exit(1)
+
+        if invoice_type == "FC":
+            open_res = printer.openBillTicket(invoice_denomination, customer_name, customer_address, customer_doc, customer_doc_type, customer_iva_type)
+        elif invoice_type == "NC":
+            open_res = printer.openBillCreditTicket(invoice_denomination, customer_name, customer_address, customer_doc, customer_doc_type, customer_iva_type)
+        elif invoice_type == "ND":
+            pass
+        else:
+            print "Documento %s no reconocido" % invoice_type
+            sys.exit(-1)
+
+        # lines = [{
+        #     'description': 'Item1',
+        #     'qty': 10,
+        #     'price': 25.0,
+        #     'tax': 21.0}]
+
+        lines = rdict['receipt']['orderlines']
+
+        for line in lines:
+            print line
+            qty = abs(line['quantity'])
+            price_with_tax = abs(line['price_with_tax'])
+            # As we don't have the tax for the line
+            # price_without_tax = abs(line['price_without_tax'])
+            # tax = ((price_with_tax / float(price_without_tax)) - 1) * 100
+            # tax_r = round(Decimal(tax), 2)
+            tax_r = line['vat_percent']
+            printer.addItem(line['product_name'], qty, price_with_tax / qty, tax_r, discount=0.0, discountDescription="", negative=False)
+
+#subtotal_lines += Decimal(line['subtotal'])
+#subtotal_lines_discount += Decimal(line['subtotal_discount'])
+#
+## Agregamos percepciones si las hay
+#if self.customer_percep:
+#if not self.posConf.debug:
+#    printer.addPerception("Percep IIBB ARBA", float(self.perception_amount))
+#
+## Descuento General
+#if self.discount != Decimal("0.0"):
+## Calculamos el descuento
+#discount_amount = subtotal_lines - subtotal_lines_discount
+#if not self.posConf.debug:
+#    if discount_amount:
+#        printer.addAdditional("DESCUENTO", float(discount_amount), None, negative=True)
+
+# Cobros
+        paymentlines = rdict['receipt']['paymentlines']
+        for payment in paymentlines:
+            printer.addPayment(payment['journal'], payment['amount'])
+
+        number_to = printer.closeDocument()  # WARNING: printer in anormal state may print ticket but here raise an printerException. Thus we return from here with None.
+        print "Ticket printed: ", number_to
+        return number_to
+
+    def parse_status(self, res):
+        assert type(res) is list, 'res must be a list'
+        # Guardamos las respuestas
+        d = {}
+        print res
+        # TODO: Review values from here, they are not coincident from what printer reports.
+        printer_status_response = int(res[0], 16)
+        fiscal_status_response = int(res[1], 16)
+        d['last_inv_B_C_doc'] = int(res[2])
+        d['aux_status'] = int(res[3], 16)
+        d['last_inv_A_doc'] = int(res[4], 16)
+        d['document_status'] = int(res[5], 16)
+        d['last_nc_B_C_doc'] = int(res[6], 16)
+        d['last_nc_A_doc'] = int(res[7], 16)
+
+        # Status fiscal
+        if ((1 << 0) & fiscal_status_response) == (1 << 0):
+            status_fiscal = "Error en chequeo de memoria fiscal. \n"
+#                    "Al encenderse la impresora se produjo un error en el " \
+#                    "checksum.  La impresora no funcionara."
+        elif ((1 << 1) & fiscal_status_response) == (1 << 1):
+            status_fiscal = "Error en chequeo de memoria de trabajo.\n"
+#                    "Al encenderse la impresora se produjo un error en el " \
+#                    "checksum.  La impresora no funcionara."
+        elif ((1 << 3) & fiscal_status_response) == (1 << 3):
+            status_fiscal = "Comando desconocido.\n"
+#                    "El comando recibido no fue reconocido."
+        elif ((1 << 4) & fiscal_status_response) == (1 << 4):
+            status_fiscal = "Datos no válidos en un campo.\n"
+#                    "Uno de los campos del comando recibido tiene datos no " \
+#                    "válidos por ejemplo, datos no numéricos en un campo numérico)."
+        elif ((1 << 5) & fiscal_status_response) == (1 << 5):
+            status_fiscal = "Comando no válido para el estado fiscal actual.\n "
+#                "Se ha recibido un comando que no es válido en el estado " \
+#                "actual del controlador (por ejemplo, abrir un recibo no " \
+#                "fiscal cuando se encuentra abierto un recibo fiscal)."
+
+        elif ((1 << 6) & fiscal_status_response) == (1 << 6):
+            status_fiscal = "Desborde del Total.\n"
+#                    "El acumulador de una transacción, del total diario o " \
+#                    "del IVA se desbordará a raíz de un comando recibido." \
+#                    "El comando no es ejecutado. Este bit debe ser monitoreado " \
+#                    "por el host para emitir un aviso de error."
+
+        elif ((1 << 7) & fiscal_status_response) == (1 << 7):
+            status_fiscal = "Memoria fiscal llena, bloqueada o dada de baja.\n"
+#                "En caso de que la memoria fiscal esté llena, bloqueada o " \
+#                "dada de baja, no se per mite abrir un comprobante fiscal."
+
+        elif ((1 << 8) & fiscal_status_response) == (1 << 8):
+            status_fiscal = "Memoria fiscal a punto de llenarse.\n"
+#                "La memoria fiscal tiene 30 o menos registros libres." \
+#                "Este bit debe ser monitoreado por el host para emitir " \
+#                "el correspondiente aviso."
+        elif ((1 << 9) & fiscal_status_response) == (1 << 9):
+            status_fiscal = "Terminal fiscal certificada.\n"
+#                "Indica que la impresora ha sido inicializada."
+        elif ((1 << 10) & fiscal_status_response) == (1 << 10):
+            status_fiscal = "Terminal fiscal certificada.\n"
+#                "Indica que la impresora ha sido inicializada."
+
+        elif ((1 << 11) & fiscal_status_response) == (1 << 11):
+            status_fiscal = "Error en ingreso de fecha.\n"
+#                "Se ha ingresado una fecha no válida." \
+#                "Para volver al bit a 0 debe ingresarse una fecha válida."
+
+        elif ((1 << 12) & fiscal_status_response) == (1 << 12):
+            status_fiscal = "Documento fiscal abierto.\n"
+#                "Este bit se encuentra en 1 siempre que un documento " \
+#                "fiscal (factura, recibo oficial o nota de crédito) se " \
+#                "encuentra abierto."
+
+        elif ((1 << 13) & fiscal_status_response) == (1 << 13):
+            status_fiscal = "Documento abierto.\n"
+#                "Este bit se encuentra en 1 siempre que un documento " \
+#                "(fiscal, no fiscal o no fiscal homologado) se encuentra abierto."
+
+        elif ((1 << 14) & fiscal_status_response) == (1 << 14):
+            status_fiscal = "STATPRN activado.\n"
+#                "Este bit se encuentra en 1 cuando se intenta enviar " \
+#                "un comando estando activado el STATPRN. El comando es rechazado."
+
+        elif ((1 << 3) & fiscal_status_response) == (1 << 3):
+            status_fiscal = "OR lógico de los bits 0 a 8.\n"
+#                "Este bit se encuentra en 1 siempre que alguno de los bits " \
+#                "mencionados se encuentre en 1."
+
+        if ((1 << 0) & printer_status_response) == (1 << 0):
+            status_printer = "Impresora Ocupada"
+        elif ((1 << 2) & printer_status_response) == (1 << 2):
+            status_printer = "Error de Impresora."
+        elif ((1 << 3) & printer_status_response) == (1 << 3):
+            status_printer = "Impresora Offline"
+        elif ((1 << 4) & printer_status_response) == (1 << 4):
+            status_printer = "Falta papel"
+        elif ((1 << 5) & printer_status_response) == (1 << 5):
+            status_printer = "Falta papel de tickets"
+        elif ((1 << 6) & printer_status_response) == (1 << 6):
+            status_printer = "Buffer de Impresora lleno"
+        elif ((1 << 7) & printer_status_response) == (1 << 7):
+            status_printer = "Impresora lista"
+        elif ((1 << 8) & printer_status_response) == (1 << 8):
+            status_printer = "Tapa de Impresora Abierta"
+
+        d['statusPrinter'] = status_printer
+        d['statusFiscal'] = status_fiscal
+
+        return status_printer, status_fiscal, d
+
     def openNonFiscalReceipt(self):
         status = self._sendCommand(self.CMD_OPEN_NON_FISCAL_RECEIPT, [])
         self._currentDocument = self.CURRENT_DOC_NON_FISCAL
