@@ -5,6 +5,7 @@ import logging
 import unicodedata
 from fiscalGeneric import PrinterInterface, PrinterException
 import epsonFiscalDriver
+import re
 
 
 class ValidationError(Exception):
@@ -169,6 +170,106 @@ class HasarPrinter(PrinterInterface):
             raise PrinterException("Error de la impresora fiscal: %s.\nComando enviado: %s" % \
                 (str(e), commandString))
 
+    def receipt(self, rdict):
+        """
+        This will be called when the endpoint print_xml_receipt is called.
+        """
+        import pprint
+        pprint.pprint(rdict)
+        printer = self
+# Creamos un ticket
+        client = rdict['receipt']['client']
+        if client:
+            client_name = client['name']
+        else:
+            client_name = 'Consumidor Final'
+        if not client or not client['fp']:  # Consumidor Final: FC/NC B
+            invoice_denomination = "B"
+            customer_iva_type = printer.IVA_TYPE_CONSUMIDOR_FINAL
+            customer_name = client_name
+            customer_doc = None
+            customer_address = ""
+            customer_doc_type = None
+        else:  # Ask the fiscal position
+            fp_str = client['fp'][1]
+            if fp_str == 'RI':
+                invoice_denomination = "A"
+                customer_iva_type = printer.IVA_TYPE_RESPONSABLE_INSCRIPTO
+                customer_name = client_name
+                customer_doc = client['vat']
+                customer_address = client['address']
+                customer_doc_type = printer.DOC_TYPE_CUIT
+            else:  # != RI
+                invoice_denomination = "B"
+                customer_iva_type = printer.IVA_TYPE_CONSUMIDOR_FINAL
+                customer_name = client_name
+                customer_doc = None
+                customer_address = ""
+                customer_doc_type = None
+
+        subtotal = rdict['receipt']['subtotal']
+        if subtotal > 0:
+            invoice_type = 'FC'
+        elif subtotal < 0:
+            invoice_type = 'NC'
+        else:
+            print 'Never should enter here!'
+            sys.exit(1)
+
+        if invoice_type == "FC":
+            open_res = printer.openBillTicket(invoice_denomination, customer_name, customer_address, customer_doc, customer_doc_type, customer_iva_type)
+        elif invoice_type == "NC":
+            open_res = printer.openBillCreditTicket(invoice_denomination, customer_name, customer_address, customer_doc, customer_doc_type, customer_iva_type)
+        elif invoice_type == "ND":
+            pass
+        else:
+            print "Documento %s no reconocido" % invoice_type
+            sys.exit(-1)
+
+        # lines = [{
+        #     'description': 'Item1',
+        #     'qty': 10,
+        #     'price': 25.0,
+        #     'tax': 21.0}]
+
+        lines = rdict['receipt']['orderlines']
+
+        for line in lines:
+            print line
+            qty = abs(line['quantity'])
+            price_with_tax = abs(line['price_with_tax'])
+            # As we don't have the tax for the line
+            # price_without_tax = abs(line['price_without_tax'])
+            # tax = ((price_with_tax / float(price_without_tax)) - 1) * 100
+            # tax_r = round(Decimal(tax), 2)
+            tax_r = line['vat_percent']
+            printer.addItem(line['product_name'], qty, price_with_tax / qty, tax_r, discount=0.0, discountDescription="", negative=False)
+
+#subtotal_lines += Decimal(line['subtotal'])
+#subtotal_lines_discount += Decimal(line['subtotal_discount'])
+#
+## Agregamos percepciones si las hay
+#if self.customer_percep:
+#if not self.posConf.debug:
+#    printer.addPerception("Percep IIBB ARBA", float(self.perception_amount))
+#
+## Descuento General
+#if self.discount != Decimal("0.0"):
+## Calculamos el descuento
+#discount_amount = subtotal_lines - subtotal_lines_discount
+#if not self.posConf.debug:
+#    if discount_amount:
+#        printer.addAdditional("DESCUENTO", float(discount_amount), None, negative=True)
+
+# Cobros
+        paymentlines = rdict['receipt']['paymentlines']
+        for payment in paymentlines:
+            printer.addPayment(payment['journal'], payment['amount'])
+
+        number_to = printer.closeDocument()  # WARNING: printer in anormal state may print ticket but here raise an printerException. Thus we return from here with None.
+        print "Ticket printed: ", number_to
+        return number_to
+
     def openNonFiscalReceipt(self):
         status = self._sendCommand(self.CMD_OPEN_NON_FISCAL_RECEIPT, [])
 
@@ -238,7 +339,7 @@ class HasarPrinter(PrinterInterface):
         # limpio el header y trailer:
         self.setHeader()
         self.setTrailer()
-        doc = doc.replace("-", "").replace(".", "")
+        doc = re.sub("[.-]", "", doc)
         if doc and docType != "3" and filter(lambda x: x not in string.digits, doc):
             # Si tiene letras se blanquea el DNI para evitar errores, excepto que sea
             # docType="3" (Pasaporte)
@@ -277,6 +378,7 @@ class HasarPrinter(PrinterInterface):
             self._sendCommand(self.CMD_OPEN_FISCAL_RECEIPT, ["T", "T"])
         self._currentDocument = self.CURRENT_DOC_TICKET
         self._savedPayments = []
+        self._savedPerceptions = []
 
 ##    def openCreditTicket( self ):
 ##        self._sendCommand( self.CMD_OPEN_CREDIT_NOTE, [ "S", "T" ] )
@@ -292,6 +394,7 @@ class HasarPrinter(PrinterInterface):
             type = "E"
         self._currentDocument = self.CURRENT_DOC_BILL_TICKET
         self._savedPayments = []
+        self._savedPerceptions = []
         return self._sendCommand(self.CMD_OPEN_FISCAL_RECEIPT, [type, "T"])
 
     def openBillCreditTicket(self, type, name, address, doc, docType, ivaType, reference="NC"):
@@ -317,6 +420,7 @@ class HasarPrinter(PrinterInterface):
         self._setCustomerData(name, address, doc, docType, ivaType)
         self._currentDocument = self.CURRENT_DOC_DNFH
         self._savedPayments = []
+        self._savedPerceptions = []
         self._copies = copies
         return self._sendCommand(self.CMD_OPEN_DNFH, ["x", "T", number[:20]])
 
